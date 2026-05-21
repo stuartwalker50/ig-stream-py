@@ -1,7 +1,12 @@
 #keep credentials out of version control
-trading_ig_config.py  
-trading_ig_config.demo.py  
-trading_ig_config.live.py  
+.env.demo
+.env.live
+
+*.pyc
+__pycache__/
+
+
+
 
 
 

@@ -1,7 +1,7 @@
 [project]
 name = "ig-stream-py"
 version = "0.1.0"
-description = "Add your description here"
+description = "A service that connects to IG Markets via the trading_ig library, streaming market data and executing orders."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -10,4 +10,12 @@ dependencies = [
     "pandas>=3.0.3",
     "pyzmq>=27.1.0",
     "trading-ig>=0.0.24",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
 ]

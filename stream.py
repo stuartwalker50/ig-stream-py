@@ -1,3 +1,4 @@
+import argparse
 import sys
 import logging
 from datetime import datetime
@@ -10,7 +11,6 @@ from lightstreamer.client import (
 )
 
 from trading_ig import IGService, IGStreamService
-from trading_ig.config import config
 from epics import epics, wait_for_input
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,35 @@ logging.basicConfig(
 )
 
 
-def ig_stream_sample():
+def parse_args(args=None):
+    """Parse command-line arguments.
+
+    Args:
+        args: List of argument strings (defaults to sys.argv[1:]). Used for testing.
+
+    Returns:
+        Namespace with parsed arguments.
+    """
+    parser = argparse.ArgumentParser(description="IG Streaming Market Data Feed")
+    parser.add_argument(
+        "--no-archive",
+        action="store_true",
+        default=False,
+        help="Disable data archival to disk",
+    )
+    return parser.parse_args(args)
+
+
+def ig_stream():
+    from trading_ig.config import config
+
+    args = parse_args()
+    archive_enabled = not args.no_archive
+    if archive_enabled:
+        logger.info("Data archival is enabled")
+    else:
+        logger.info("Data archival is disabled")
+
     ig_service = IGService(
         config.username,
         config.password,
@@ -168,4 +196,4 @@ class StatusListener(ClientListener):
 
 
 if __name__ == "__main__":
-    ig_stream_sample()
+    ig_stream()
