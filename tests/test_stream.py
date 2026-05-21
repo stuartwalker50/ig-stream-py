@@ -15,6 +15,8 @@ from stream import (
     TradeListener,
     _BACKOFF_MAX,
     _BACKOFF_INITIAL,
+    _ZMQ_PORT_DEMO,
+    _ZMQ_PORT_LIVE,
 )
 import stream as stream_mod
 
@@ -25,14 +27,14 @@ def _make_ig_stream_patches(connect_side_effect):
     """Return a context-manager stack that stubs out all I/O in ig_stream()."""
     fake_config = MagicMock()
     fake_config.acc_number = "ACC001"
+    fake_config.acc_type = "DEMO"
     sys.modules["trading_ig.config"].config = fake_config
 
     return [
         patch("stream._connect_once", side_effect=connect_side_effect),
         patch("stream.wait_if_blackout"),
         patch("stream.IGService"),
-        patch("stream.parse_args", return_value=MagicMock(no_archive=True,
-                                                          zmq_endpoint="tcp://*:5555")),
+        patch("stream.parse_args", return_value=MagicMock(no_archive=True)),
         patch("stream.ZmqPublisher"),
         patch("stream.time.sleep"),
     ]

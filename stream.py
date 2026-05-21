@@ -47,7 +47,8 @@ _LONDON = ZoneInfo("Europe/London")
 _BLACKOUT_HOUR = 22          # 22:00–22:59 London time
 _BACKOFF_INITIAL = 2         # seconds
 _BACKOFF_MAX = 1800          # 30 minutes
-_ZMQ_ENDPOINT = "tcp://*:5555"
+_ZMQ_PORT_DEMO = 5555        # ZeroMQ PUB port for DEMO accounts
+_ZMQ_PORT_LIVE = 5556        # ZeroMQ PUB port for LIVE accounts
 
 
 def parse_args(args=None):
@@ -66,11 +67,6 @@ def parse_args(args=None):
         default=False,
         help="Disable data archival to disk",
     )
-    parser.add_argument(
-        "--zmq-endpoint",
-        default=_ZMQ_ENDPOINT,
-        help=f"ZeroMQ PUB socket bind address (default: {_ZMQ_ENDPOINT})",
-    )
     return parser.parse_args(args)
 
 
@@ -87,7 +83,7 @@ class ZmqPublisher:
     ``[topic_bytes, json_payload_bytes]``.
     """
 
-    def __init__(self, endpoint: str = _ZMQ_ENDPOINT):
+    def __init__(self, endpoint: str = f"tcp://*:{_ZMQ_PORT_DEMO}"):
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.PUB)
         self._socket.bind(endpoint)
@@ -208,8 +204,10 @@ def ig_stream():
     else:
         logger.info("Data archival is disabled")
 
-    publisher = ZmqPublisher(args.zmq_endpoint)
     metrics = StreamMetrics()
+    publisher = ZmqPublisher(
+        f"tcp://*:{_ZMQ_PORT_LIVE if config.acc_type.upper() == 'LIVE' else _ZMQ_PORT_DEMO}"
+    )
 
     ig_service = IGService(
         config.username,
