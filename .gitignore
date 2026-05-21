@@ -1,0 +1,8 @@
+#keep credentials out of version control
+trading_ig_config.py  
+trading_ig_config.demo.py  
+trading_ig_config.live.py  
+
+
+
+

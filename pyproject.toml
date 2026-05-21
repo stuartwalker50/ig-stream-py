@@ -1,0 +1,13 @@
+[project]
+name = "ig-stream-py"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "lightstreamer-client>=0.1",
+    "munch>=4.0.0",
+    "pandas>=3.0.3",
+    "pyzmq>=27.1.0",
+    "trading-ig>=0.0.24",
+]
