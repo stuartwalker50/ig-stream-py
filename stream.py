@@ -171,6 +171,8 @@ def ig_stream():
 
         try:
             result = _connect_once(ig_service, config.acc_number, archive, stop_event)
+            # Session was established; reset backoff so the next reconnect starts fresh
+            backoff = _BACKOFF_INITIAL
         except Exception as exc:
             logger.error(f"Connection error: {exc}")
             result = "disconnect"
