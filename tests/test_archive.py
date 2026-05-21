@@ -61,6 +61,14 @@ class TestTickArchive:
         assert count == 200
         archive.close()
 
+    def test_indexes_exist(self):
+        archive = TickArchive(":memory:")
+        cur = archive._conn.execute("PRAGMA index_list(ticks)")
+        index_names = {row[1] for row in cur.fetchall()}
+        assert "idx_ticks_symbol" in index_names
+        assert "idx_ticks_timestamp" in index_names
+        archive.close()
+
     def test_create_data_directory(self, tmp_path):
         db_path = str(tmp_path / "subdir" / "test.db")
         archive = TickArchive(db_path)

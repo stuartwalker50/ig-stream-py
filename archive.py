@@ -37,6 +37,12 @@ class TickArchive:
                 )
                 """
             )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ticks_symbol ON ticks (symbol)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ticks_timestamp ON ticks (timestamp)"
+            )
             self._conn.commit()
 
     def insert(self, timestamp: float, symbol: str, bid: float, offer: float, state: str):
