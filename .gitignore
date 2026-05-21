@@ -1,0 +1,13 @@
+#keep credentials out of version control
+.env.demo
+.env.live
+
+*.pyc
+__pycache__/
+
+
+
+
+
+
+
