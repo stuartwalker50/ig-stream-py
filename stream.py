@@ -1,4 +1,5 @@
 import argparse
+import json
 import signal
 import sys
 import logging
@@ -6,6 +7,8 @@ import time
 import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+import zmq
 
 from lightstreamer.client import (
     Subscription,
@@ -31,6 +34,7 @@ _LONDON = ZoneInfo("Europe/London")
 _BLACKOUT_HOUR = 22          # 22:00–22:59 London time
 _BACKOFF_INITIAL = 2         # seconds
 _BACKOFF_MAX = 1800          # 30 minutes
+_ZMQ_ENDPOINT = "tcp://*:5555"
 
 
 def parse_args(args=None):
@@ -49,12 +53,40 @@ def parse_args(args=None):
         default=False,
         help="Disable data archival to disk",
     )
+    parser.add_argument(
+        "--zmq-endpoint",
+        default=_ZMQ_ENDPOINT,
+        help=f"ZeroMQ PUB socket bind address (default: {_ZMQ_ENDPOINT})",
+    )
     return parser.parse_args(args)
 
 
 def next_backoff(current: float, cap: float = _BACKOFF_MAX) -> float:
     """Return the next exponential backoff delay, capped at *cap* seconds."""
     return min(current * 2, cap)
+
+
+class ZmqPublisher:
+    """Thin wrapper around a ZeroMQ PUB socket.
+
+    Publishes JSON-encoded messages on three topics: ``prices``, ``account``,
+    and ``trades``.  Each message is sent as a two-frame multipart message:
+    ``[topic_bytes, json_payload_bytes]``.
+    """
+
+    def __init__(self, endpoint: str = _ZMQ_ENDPOINT):
+        self._context = zmq.Context()
+        self._socket = self._context.socket(zmq.PUB)
+        self._socket.bind(endpoint)
+        logger.info(f"ZeroMQ PUB socket bound to {endpoint}")
+
+    def publish(self, topic: str, data: dict) -> None:
+        """Send *data* as JSON on *topic*."""
+        self._socket.send_multipart([topic.encode(), json.dumps(data).encode()])
+
+    def close(self) -> None:
+        self._socket.close()
+        self._context.term()
 
 
 def wait_if_blackout(now: datetime | None = None) -> None:
@@ -69,7 +101,8 @@ def wait_if_blackout(now: datetime | None = None) -> None:
 
 
 def _connect_once(ig_service: IGService, acc_number: str, archive: TickArchive | None,
-                  stop_event: threading.Event) -> str:
+                  stop_event: threading.Event,
+                  publisher: ZmqPublisher | None = None) -> str:
     """Create one Lightstreamer session and block until disconnected or stopped.
 
     Returns:
@@ -97,7 +130,7 @@ def _connect_once(ig_service: IGService, acc_number: str, archive: TickArchive |
         ],
     )
     price_subscription.setDataAdapter("Pricing")
-    price_subscription.addListener(PriceListener(archive=archive))
+    price_subscription.addListener(PriceListener(archive=archive, publisher=publisher))
     ig_stream_service.subscribe(price_subscription)
 
     # ACCOUNT subscription
@@ -106,7 +139,7 @@ def _connect_once(ig_service: IGService, acc_number: str, archive: TickArchive |
         items=[f"ACCOUNT:{acc_number}"],
         fields=["FUNDS", "MARGIN", "AVAILABLE_TO_DEAL", "PNL", "EQUITY", "EQUITY_USED"],
     )
-    account_subscription.addListener(AccountListener())
+    account_subscription.addListener(AccountListener(publisher=publisher))
     ig_stream_service.subscribe(account_subscription)
 
     # TRADE subscription
@@ -115,7 +148,7 @@ def _connect_once(ig_service: IGService, acc_number: str, archive: TickArchive |
         items=[f"TRADE:{acc_number}"],
         fields=["CONFIRMS", "OPU", "WOU"],
     )
-    trade_subscription.addListener(TradeListener())
+    trade_subscription.addListener(TradeListener(publisher=publisher))
     ig_stream_service.subscribe(trade_subscription)
 
     # Status listener – signals disconnect_event on terminal status
@@ -146,6 +179,8 @@ def ig_stream():
     else:
         logger.info("Data archival is disabled")
 
+    publisher = ZmqPublisher(args.zmq_endpoint)
+
     ig_service = IGService(
         config.username,
         config.password,
@@ -170,7 +205,8 @@ def ig_stream():
             break
 
         try:
-            result = _connect_once(ig_service, config.acc_number, archive, stop_event)
+            result = _connect_once(ig_service, config.acc_number, archive, stop_event,
+                                   publisher=publisher)
             # Session was established; reset backoff so the next reconnect starts fresh
             backoff = _BACKOFF_INITIAL
         except Exception as exc:
@@ -189,12 +225,15 @@ def ig_stream():
 
     if archive is not None:
         archive.close()
+    publisher.close()
     logger.info("ig-stream-py stopped.")
 
 
 class PriceListener(SubscriptionListener):
-    def __init__(self, archive: TickArchive | None = None):
+    def __init__(self, archive: TickArchive | None = None,
+                 publisher: ZmqPublisher | None = None):
         self._archive = archive
+        self._publisher = publisher
 
     def onItemUpdate(self, update: ItemUpdate):
         ts_raw = update.getValue("TIMESTAMP")
@@ -213,6 +252,19 @@ class PriceListener(SubscriptionListener):
         #     f"High: {update.getValue('HIGH')}, "
         #     f"Low: {update.getValue('LOW')}"
         # )
+
+        if self._publisher is not None:
+            self._publisher.publish("prices", {
+                "item": update.getItemName(),
+                "TIMESTAMP": ts_raw,
+                "BIDPRICE1": bid_raw,
+                "ASKPRICE1": offer_raw,
+                "NET_CHG": update.getValue("NET_CHG"),
+                "DLG_FLAG": dlg_raw,
+                "NET_CHG_": update.getValue("NET_CHG_"),
+                "HIGH": update.getValue("HIGH"),
+                "LOW": update.getValue("LOW"),
+            })
 
         if self._archive is not None and None not in (ts_raw, bid_raw, offer_raw, dlg_raw):
             # Extract plain epic from "PRICE:{acc}:{epic}"
@@ -237,6 +289,9 @@ class PriceListener(SubscriptionListener):
 
 
 class AccountListener(SubscriptionListener):
+    def __init__(self, publisher: ZmqPublisher | None = None):
+        self._publisher = publisher
+
     def onItemUpdate(self, update: ItemUpdate):
         logger.info(
             f"{update.getItemName()} "
@@ -247,6 +302,17 @@ class AccountListener(SubscriptionListener):
             f"Equity: {update.getValue('EQUITY')}, "
             f"Equity used: {update.getValue('EQUITY_USED')}%"
         )
+
+        if self._publisher is not None:
+            self._publisher.publish("account", {
+                "item": update.getItemName(),
+                "FUNDS": update.getValue("FUNDS"),
+                "MARGIN": update.getValue("MARGIN"),
+                "AVAILABLE_TO_DEAL": update.getValue("AVAILABLE_TO_DEAL"),
+                "PNL": update.getValue("PNL"),
+                "EQUITY": update.getValue("EQUITY"),
+                "EQUITY_USED": update.getValue("EQUITY_USED"),
+            })
 
     def onSubscription(self):
         logger.info("AccountListener onSubscription()")
@@ -259,6 +325,9 @@ class AccountListener(SubscriptionListener):
 
 
 class TradeListener(SubscriptionListener):
+    def __init__(self, publisher: ZmqPublisher | None = None):
+        self._publisher = publisher
+
     def onItemUpdate(self, update: ItemUpdate):
         logger.info(
             f"{update.getItemName()} "
@@ -266,6 +335,14 @@ class TradeListener(SubscriptionListener):
             f"Open position updates: {update.getValue('OPU')}, "
             f"Working order updates: {update.getValue('WOU')}, "
         )
+
+        if self._publisher is not None:
+            self._publisher.publish("trades", {
+                "item": update.getItemName(),
+                "CONFIRMS": update.getValue("CONFIRMS"),
+                "OPU": update.getValue("OPU"),
+                "WOU": update.getValue("WOU"),
+            })
 
     def onSubscription(self):
         logger.info("TradeListener onSubscription()")

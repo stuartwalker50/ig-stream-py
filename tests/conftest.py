@@ -33,3 +33,7 @@ for _cls_name in ("Subscription", "SubscriptionListener", "ItemUpdate", "ClientL
 _tig = sys.modules["trading_ig"]
 for _cls_name in ("IGService", "IGStreamService"):
     setattr(_tig, _cls_name, type(_cls_name, (), {}))
+
+# Stub ZMQ socket-type constants used in ZmqPublisher
+sys.modules["zmq"].PUB = 1
+sys.modules["zmq"].Context = type("Context", (), {})
