@@ -149,7 +149,6 @@ def _connect_once(ig_service: IGService, acc_number: str, archive: TickArchive |
             "ASKPRICE1",
             "NET_CHG",
             "DLG_FLAG",
-            "NET_CHG_",
             "HIGH",
             "LOW",
         ],
@@ -300,7 +299,6 @@ class PriceListener(SubscriptionListener):
                 "ASKPRICE1": offer_raw,
                 "NET_CHG": update.getValue("NET_CHG"),
                 "DLG_FLAG": dlg_raw,
-                "NET_CHG_": update.getValue("NET_CHG_"),
                 "HIGH": update.getValue("HIGH"),
                 "LOW": update.getValue("LOW"),
             })
