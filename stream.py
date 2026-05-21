@@ -200,17 +200,17 @@ class PriceListener(SubscriptionListener):
         offer_raw = update.getValue("ASKPRICE1")
         dlg_raw = update.getValue("DLG_FLAG")
 
-        logger.info(
-            f"{datetime.fromtimestamp(int(ts_raw) / 1000).strftime('%Y-%m-%d %H:%M:%S')} "
-            f"{update.getItemName()} "
-            f"Bid: {bid_raw}, "
-            f"Offer: {offer_raw}, "
-            f"Price change: {update.getValue('NET_CHG')}, "
-            f"State: {dlg_raw.strip() if dlg_raw else None}, "
-            f"Change: {update.getValue('NET_CHG_')}%, "
-            f"High: {update.getValue('HIGH')}, "
-            f"Low: {update.getValue('LOW')}"
-        )
+        # logger.info(
+        #     f"{datetime.fromtimestamp(int(ts_raw) / 1000).strftime('%Y-%m-%d %H:%M:%S')} "
+        #     f"{update.getItemName()} "
+        #     f"Bid: {bid_raw}, "
+        #     f"Offer: {offer_raw}, "
+        #     f"Price change: {update.getValue('NET_CHG')}, "
+        #     f"State: {dlg_raw.strip() if dlg_raw else None}, "
+        #     f"Change: {update.getValue('NET_CHG_')}%, "
+        #     f"High: {update.getValue('HIGH')}, "
+        #     f"Low: {update.getValue('LOW')}"
+        # )
 
         if self._archive is not None and None not in (ts_raw, bid_raw, offer_raw, dlg_raw):
             # Extract plain epic from "PRICE:{acc}:{epic}"

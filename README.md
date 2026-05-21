@@ -5,16 +5,19 @@ A service that connects to IG Markets via the `trading_ig` library, streaming ma
 ## Usage
 
 ```bash
+# Setup
+uv sync
+
 # Run (account mode is read from the environment variables sourced first)
-source .env.demo && python3 stream.py
+source .env.demo && uv run stream.py
  OR
-source .env.live && python3 stream.py
+source .env.live && uv run stream.py
 
 # Run without data archival
-python stream.py --no-archive
+uv run stream.py --no-archive
 
 # See all options
-python stream.py --help
+uv run stream.py --help
 ```
 
 ### Options
