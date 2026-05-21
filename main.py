@@ -1,5 +1,8 @@
+from stream import ig_stream
+
+
 def main():
-    print("Starting ig-stream-py...")
+    ig_stream()
 
 
 if __name__ == "__main__":

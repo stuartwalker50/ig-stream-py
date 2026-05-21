@@ -1,7 +1,11 @@
 import argparse
+import signal
 import sys
 import logging
+import time
+import threading
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from lightstreamer.client import (
     Subscription,
@@ -11,7 +15,8 @@ from lightstreamer.client import (
 )
 
 from trading_ig import IGService, IGStreamService
-from epics import epics, wait_for_input
+from archive import TickArchive, default_db_path
+from epics import epics
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +26,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
 )
+
+_LONDON = ZoneInfo("Europe/London")
+_BLACKOUT_HOUR = 22          # 22:00–22:59 London time
+_BACKOFF_INITIAL = 2         # seconds
+_BACKOFF_MAX = 1800          # 30 minutes
 
 
 def parse_args(args=None):
@@ -42,33 +52,39 @@ def parse_args(args=None):
     return parser.parse_args(args)
 
 
-def ig_stream():
-    from trading_ig.config import config
+def next_backoff(current: float, cap: float = _BACKOFF_MAX) -> float:
+    """Return the next exponential backoff delay, capped at *cap* seconds."""
+    return min(current * 2, cap)
 
-    args = parse_args()
-    archive_enabled = not args.no_archive
-    if archive_enabled:
-        logger.info("Data archival is enabled")
-    else:
-        logger.info("Data archival is disabled")
 
-    ig_service = IGService(
-        config.username,
-        config.password,
-        config.api_key,
-        config.acc_type,
-        acc_number=config.acc_number,
-    )
+def wait_if_blackout(now: datetime | None = None) -> None:
+    """Sleep until 23:00 London time if called during the blackout window (22:xx)."""
+    if now is None:
+        now = datetime.now(tz=_LONDON)
+    if now.hour == _BLACKOUT_HOUR:
+        wake = now.replace(hour=23, minute=0, second=0, microsecond=0)
+        delay = (wake - now).total_seconds()
+        logger.info(f"Blackout window active – sleeping {delay:.0f}s until 23:00 London time")
+        time.sleep(delay)
+
+
+def _connect_once(ig_service: IGService, acc_number: str, archive: TickArchive | None,
+                  stop_event: threading.Event) -> str:
+    """Create one Lightstreamer session and block until disconnected or stopped.
+
+    Returns:
+        "stopped"    – caller should shut down cleanly.
+        "disconnect" – caller should reconnect after a backoff delay.
+    """
+    disconnect_event = threading.Event()
 
     ig_stream_service = IGStreamService(ig_service)
     ig_stream_service.create_session()
-    # ig_stream_service.create_session(version='3')
 
-    # create a new PRICE Subscription
+    # PRICE subscription
     price_subscription = Subscription(
         mode="MERGE",
-        # fx_epics, index_epics, weekend_epics, futures_epics, cfd_fx_epics
-        items=[f"PRICE:{config.acc_number}:{epic}" for epic in epics],
+        items=[f"PRICE:{acc_number}:{epic}" for epic in epics],
         fields=[
             "TIMESTAMP",
             "BIDPRICE1",
@@ -80,64 +96,133 @@ def ig_stream():
             "LOW",
         ],
     )
-
     price_subscription.setDataAdapter("Pricing")
-
-    # adding a listener to PRICE subscription
-    price_subscription.addListener(PriceListener())
-
-    # registering the PRICE subscription
+    price_subscription.addListener(PriceListener(archive=archive))
     ig_stream_service.subscribe(price_subscription)
 
-    # create a new ACCOUNT subscription
+    # ACCOUNT subscription
     account_subscription = Subscription(
         mode="MERGE",
-        items=[f"ACCOUNT:{config.acc_number}"],
+        items=[f"ACCOUNT:{acc_number}"],
         fields=["FUNDS", "MARGIN", "AVAILABLE_TO_DEAL", "PNL", "EQUITY", "EQUITY_USED"],
     )
-
-    # adding a listener to ACCOUNT subscription
     account_subscription.addListener(AccountListener())
-
-    # registering the ACCOUNT subscription
     ig_stream_service.subscribe(account_subscription)
 
-    # create a new TRADE Subscription
+    # TRADE subscription
     trade_subscription = Subscription(
         mode="DISTINCT",
-        items=[f"TRADE:{config.acc_number}"],
+        items=[f"TRADE:{acc_number}"],
         fields=["CONFIRMS", "OPU", "WOU"],
     )
-
-    # adding a listener to TRADE subscription
     trade_subscription.addListener(TradeListener())
-
-    # registering the TRADE subscription
     ig_stream_service.subscribe(trade_subscription)
 
-    # adding a ClientListener
-    ig_stream_service.add_client_listener(StatusListener())
+    # Status listener – signals disconnect_event on terminal status
+    ig_stream_service.add_client_listener(StatusListener(disconnect_event))
 
-    # await updates
-    wait_for_input()
+    # Block until the session drops or the user requests a stop
+    while not stop_event.is_set() and not disconnect_event.is_set():
+        time.sleep(0.5)
 
-    # disconnecting
     ig_stream_service.disconnect()
+
+    if stop_event.is_set():
+        return "stopped"
+    return "disconnect"
+
+
+def ig_stream():
+    from trading_ig.config import config
+
+    args = parse_args()
+    archive_enabled = not args.no_archive
+
+    archive: TickArchive | None = None
+    if archive_enabled:
+        db_path = default_db_path()
+        archive = TickArchive(db_path)
+        logger.info(f"Data archival enabled → {db_path}")
+    else:
+        logger.info("Data archival is disabled")
+
+    ig_service = IGService(
+        config.username,
+        config.password,
+        config.api_key,
+        config.acc_type,
+        acc_number=config.acc_number,
+    )
+
+    stop_event = threading.Event()
+
+    def _handle_signal(signum, frame):
+        logger.info(f"Signal {signum} received – shutting down…")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    backoff = _BACKOFF_INITIAL
+    while not stop_event.is_set():
+        wait_if_blackout()
+        if stop_event.is_set():
+            break
+
+        try:
+            result = _connect_once(ig_service, config.acc_number, archive, stop_event)
+        except Exception as exc:
+            logger.error(f"Connection error: {exc}")
+            result = "disconnect"
+
+        if result == "stopped":
+            break
+
+        logger.info(f"Disconnected – retrying in {backoff}s…")
+        for _ in range(int(backoff * 2)):
+            if stop_event.is_set():
+                break
+            time.sleep(0.5)
+        backoff = next_backoff(backoff)
+
+    if archive is not None:
+        archive.close()
+    logger.info("ig-stream-py stopped.")
 
 
 class PriceListener(SubscriptionListener):
+    def __init__(self, archive: TickArchive | None = None):
+        self._archive = archive
+
     def onItemUpdate(self, update: ItemUpdate):
+        ts_raw = update.getValue("TIMESTAMP")
+        bid_raw = update.getValue("BIDPRICE1")
+        offer_raw = update.getValue("ASKPRICE1")
+        dlg_raw = update.getValue("DLG_FLAG")
+
         logger.info(
-            f"{datetime.fromtimestamp(int(update.getValue('TIMESTAMP')) / 1000).strftime('%Y-%m-%d %H:%M:%S')} "
+            f"{datetime.fromtimestamp(int(ts_raw) / 1000).strftime('%Y-%m-%d %H:%M:%S')} "
             f"{update.getItemName()} "
-            f"Bid: {update.getValue('BIDPRICE1')}, "
-            f"Offer: {update.getValue('ASKPRICE1')}, "
+            f"Bid: {bid_raw}, "
+            f"Offer: {offer_raw}, "
             f"Price change: {update.getValue('NET_CHG')}, "
-            f"State: {update.getValue('DLG_FLAG').strip()}, "
+            f"State: {dlg_raw.strip() if dlg_raw else None}, "
             f"Change: {update.getValue('NET_CHG_')}%, "
             f"High: {update.getValue('HIGH')}, "
             f"Low: {update.getValue('LOW')}"
         )
+
+        if self._archive is not None and None not in (ts_raw, bid_raw, offer_raw, dlg_raw):
+            # Extract plain epic from "PRICE:{acc}:{epic}"
+            parts = update.getItemName().split(":", 2)
+            symbol = parts[2] if len(parts) == 3 else update.getItemName()
+            self._archive.insert(
+                timestamp=int(ts_raw) / 1000,
+                symbol=symbol,
+                bid=float(bid_raw),
+                offer=float(offer_raw),
+                state=dlg_raw.strip(),
+            )
 
     def onSubscription(self):
         logger.info("PriceListener onSubscription()")
@@ -191,8 +276,20 @@ class TradeListener(SubscriptionListener):
 
 
 class StatusListener(ClientListener):
-    def onStatusChange(self, status):
-        print(f"{datetime.now()}: ***** {status} *****")
+    # Statuses that mean the server closed the connection and we must reconnect
+    _TERMINAL_STATUSES = frozenset({
+        "DISCONNECTED",
+        "DISCONNECTED:WILL-RETRY",
+        "DISCONNECTED:TRYING-RECOVERY",
+    })
+
+    def __init__(self, disconnect_event: threading.Event):
+        self._disconnect_event = disconnect_event
+
+    def onStatusChange(self, status: str):
+        logger.info(f"{datetime.now()}: ***** {status} *****")
+        if status in self._TERMINAL_STATUSES:
+            self._disconnect_event.set()
 
 
 if __name__ == "__main__":
