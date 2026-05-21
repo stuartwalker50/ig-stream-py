@@ -7,6 +7,7 @@ import time
 import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from dataclasses import dataclass
 
 import zmq
 
@@ -22,6 +23,18 @@ from archive import TickArchive, default_db_path
 from epics import epics
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StreamMetrics:
+    """Shared state for tracking stream metrics."""
+    status: str = "DISCONNECTED"
+    ticks_received: int = 0
+    lock: threading.Lock = None
+
+    def __post_init__(self):
+        if self.lock is None:
+            self.lock = threading.Lock()
 
 
 logging.basicConfig(
@@ -100,9 +113,25 @@ def wait_if_blackout(now: datetime | None = None) -> None:
         time.sleep(delay)
 
 
+def _status_reporter(metrics: StreamMetrics, stop_event: threading.Event) -> None:
+    """Background thread that prints status every 5 seconds."""
+    while not stop_event.is_set():
+        with metrics.lock:
+            now = datetime.now(tz=_LONDON).strftime("%H:%M:%S")
+            status_line = f"[{now}] Connection: {metrics.status} | Ticks: {metrics.ticks_received}"
+            logger.info(status_line)
+        
+        # Sleep in small increments to respond quickly to stop_event
+        for _ in range(10):
+            if stop_event.is_set():
+                break
+            time.sleep(0.5)
+
+
 def _connect_once(ig_service: IGService, acc_number: str, archive: TickArchive | None,
                   stop_event: threading.Event,
-                  publisher: ZmqPublisher | None = None) -> str:
+                  publisher: ZmqPublisher | None = None,
+                  metrics: StreamMetrics | None = None) -> str:
     """Create one Lightstreamer session and block until disconnected or stopped.
 
     Returns:
@@ -130,7 +159,7 @@ def _connect_once(ig_service: IGService, acc_number: str, archive: TickArchive |
         ],
     )
     price_subscription.setDataAdapter("Pricing")
-    price_subscription.addListener(PriceListener(archive=archive, publisher=publisher))
+    price_subscription.addListener(PriceListener(archive=archive, publisher=publisher, metrics=metrics))
     ig_stream_service.subscribe(price_subscription)
 
     # ACCOUNT subscription
@@ -152,7 +181,7 @@ def _connect_once(ig_service: IGService, acc_number: str, archive: TickArchive |
     ig_stream_service.subscribe(trade_subscription)
 
     # Status listener – signals disconnect_event on terminal status
-    ig_stream_service.add_client_listener(StatusListener(disconnect_event))
+    ig_stream_service.add_client_listener(StatusListener(disconnect_event, metrics=metrics))
 
     # Block until the session drops or the user requests a stop
     while not stop_event.is_set() and not disconnect_event.is_set():
@@ -180,6 +209,7 @@ def ig_stream():
         logger.info("Data archival is disabled")
 
     publisher = ZmqPublisher(args.zmq_endpoint)
+    metrics = StreamMetrics()
 
     ig_service = IGService(
         config.username,
@@ -198,6 +228,10 @@ def ig_stream():
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    # Start status reporter thread
+    reporter_thread = threading.Thread(target=_status_reporter, args=(metrics, stop_event), daemon=True)
+    reporter_thread.start()
+
     backoff = _BACKOFF_INITIAL
     while not stop_event.is_set():
         wait_if_blackout()
@@ -206,7 +240,7 @@ def ig_stream():
 
         try:
             result = _connect_once(ig_service, config.acc_number, archive, stop_event,
-                                   publisher=publisher)
+                                   publisher=publisher, metrics=metrics)
             # Session was established; reset backoff so the next reconnect starts fresh
             backoff = _BACKOFF_INITIAL
         except Exception as exc:
@@ -231,15 +265,22 @@ def ig_stream():
 
 class PriceListener(SubscriptionListener):
     def __init__(self, archive: TickArchive | None = None,
-                 publisher: ZmqPublisher | None = None):
+                 publisher: ZmqPublisher | None = None,
+                 metrics: StreamMetrics | None = None):
         self._archive = archive
         self._publisher = publisher
+        self._metrics = metrics
 
     def onItemUpdate(self, update: ItemUpdate):
         ts_raw = update.getValue("TIMESTAMP")
         bid_raw = update.getValue("BIDPRICE1")
         offer_raw = update.getValue("ASKPRICE1")
         dlg_raw = update.getValue("DLG_FLAG")
+
+        # Increment tick counter
+        if self._metrics is not None:
+            with self._metrics.lock:
+                self._metrics.ticks_received += 1
 
         # logger.info(
         #     f"{datetime.fromtimestamp(int(ts_raw) / 1000).strftime('%Y-%m-%d %H:%M:%S')} "
@@ -362,11 +403,18 @@ class StatusListener(ClientListener):
         "DISCONNECTED:TRYING-RECOVERY",
     })
 
-    def __init__(self, disconnect_event: threading.Event):
+    def __init__(self, disconnect_event: threading.Event, metrics: StreamMetrics | None = None):
         self._disconnect_event = disconnect_event
+        self._metrics = metrics
 
     def onStatusChange(self, status: str):
         logger.info(f"{datetime.now()}: ***** {status} *****")
+        
+        # Update metrics
+        if self._metrics is not None:
+            with self._metrics.lock:
+                self._metrics.status = status
+        
         if status in self._TERMINAL_STATUSES:
             self._disconnect_event.set()
 
